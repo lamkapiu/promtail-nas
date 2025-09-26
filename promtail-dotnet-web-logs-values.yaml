@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: promtail-nas
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: promtail-nas
+  template:
+    metadata:
+      labels:
+        app: promtail-nas
+    spec:
+      containers:
+        - name: promtail
+          image: registry.cn-shenzhen.aliyuncs.com/lamkapiu/openvpn-client-cifs-promtail:v2
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["NET_ADMIN", "SYS_ADMIN"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "启动 OpenVPN..."
+              openvpn --config /vpn/client.conf &
+
+              echo "等待 VPN 建立..."
+              for i in $(seq 1 30); do
+                ping -c1 -W1 2043749135-kbt29.cn-shenzhen.nas.aliyuncs.com && break
+                sleep 2
+              done
+              echo "VPN 已建立"
+
+              mkdir -p /mnt/nas
+              echo "挂载 NAS..."
+              while true; do
+                if ! mountpoint -q /mnt/nas; then
+                  mount -t cifs //2043749135-kbt29.cn-shenzhen.nas.aliyuncs.com/myshare /mnt/nas \
+                    -o vers=3.0,guest
+                  if [ $? -eq 0 ]; then
+                    echo "NAS 挂载成功"
+                    break
+                  else
+                    echo "NAS 挂载失败，5秒后重试"
+                    sleep 5
+                  fi
+                fi
+              done
+
+              echo "启动 Promtail..."
+              exec promtail -config.file=/etc/promtail/promtail-config.yaml
+
+          volumeMounts:
+            - name: vpn-files
+              mountPath: /vpn
+            - name: promtail-config
+              mountPath: /etc/promtail
+            - name: positions
+              mountPath: /var/log/positions
+
+      volumes:
+        - name: vpn-files
+          projected:
+            sources:
+              - configMap:
+                  name: openvpn-client-config
+              - secret:
+                  name: openvpn-client-secret
+
+        - name: promtail-config
+          configMap:
+            name: promtail-nas-config
+
+        - name: positions
+          persistentVolumeClaim:
+            claimName: promtail-positions-pvc
